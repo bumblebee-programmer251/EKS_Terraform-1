@@ -1,85 +1,74 @@
-
-# VPC
-module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
-
-  name = "jenkins-vpc"
-  cidr = var.vpc_cidr
-
-  azs            = data.aws_availability_zones.azs.names
-  public_subnets = var.public_subnets
-  map_public_ip_on_launch = true
-
-  enable_dns_hostnames = true
-
-  tags = {
-    Name        = "jenkins-vpc"
-    Terraform   = "true"
-    Environment = "dev"
-  }
-
-  public_subnet_tags = {
-    Name = "jenkins-subnet"
-  }
-}
-
-# SG
-module "sg" {
-  source = "terraform-aws-modules/security-group/aws"
-
-  name        = "jenkins-sg"
-  description = "Security Group for Jenkins Server"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress_with_cidr_blocks = [
-    {
-      from_port   = 8080
-      to_port     = 8080
-      protocol    = "tcp"
-      description = "HTTP"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      description = "SSH"
-      cidr_blocks = "0.0.0.0/0"
+pipeline {
+    agent any
+    environment {
+        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        AWS_DEFAULT_REGION = "us-east-1"
     }
-  ]
-
-  egress_with_cidr_blocks = [
-    {
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = "0.0.0.0/0"
+    stages {
+        stage('Checkout SCM'){
+            steps{
+                script{
+                    checkout scmGit(branches: [[name: '*/main']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/gauri17-pro/terraform-jenkins-eks.git']])
+                }
+            }
+        }
+        stage('Initializing Terraform'){
+            steps{
+                script{
+                    dir('EKS'){
+                        sh 'terraform init'
+                    }
+                }
+            }
+        }
+        stage('Formatting Terraform Code'){
+            steps{
+                script{
+                    dir('EKS'){
+                        sh 'terraform fmt'
+                    }
+                }
+            }
+        }
+        stage('Validating Terraform'){
+            steps{
+                script{
+                    dir('EKS'){
+                        sh 'terraform validate'
+                    }
+                }
+            }
+        }
+        stage('Previewing the Infra using Terraform'){
+            steps{
+                script{
+                    dir('EKS'){
+                        sh 'terraform plan'
+                    }
+                    input(message: "Are you sure to proceed?", ok: "Proceed")
+                }
+            }
+        }
+        stage('Creating/Destroying an EKS Cluster'){
+            steps{
+                script{
+                    dir('EKS') {
+                        sh 'terraform $action --auto-approve'
+                    }
+                }
+            }
+        }
+        stage('Deploying Nginx Application') {
+            steps{
+                script{
+                    dir('EKS/ConfigurationFiles') {
+                        sh 'aws eks update-kubeconfig --name my-eks-cluster'
+                        sh 'kubectl apply -f deployment.yaml'
+                        sh 'kubectl apply -f service.yaml'
+                    }
+                }
+            }
+        }
     }
-  ]
-
-  tags = {
-    Name = "jenkins-sg"
-  }
-}
-
-# EC2
-module "ec2_instance" {
-  source = "terraform-aws-modules/ec2-instance/aws"
-
-  name = "Jenkins-Server"
-
-  instance_type               = var.instance_type
-  key_name                    = "jenkins-server-key"
-  monitoring                  = true
-  vpc_security_group_ids      = [module.sg.security_group_id]
-  subnet_id                   = module.vpc.public_subnets[0]
-  associate_public_ip_address = true
-  user_data                   = file("jenkins-install.sh")
-  availability_zone           = data.aws_availability_zones.azs.names[0]
-
-  tags = {
-    Name        = "Jenkins-Server"
-    Terraform   = "true"
-    Environment = "dev"
-  }
 }
